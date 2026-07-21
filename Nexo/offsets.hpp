@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <chrono>
 #include <nlohmann/json.hpp>
+#include <shlobj.h>
 #include "memory.hpp"
 
 namespace nexo {
