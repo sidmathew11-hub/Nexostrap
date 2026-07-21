@@ -1,5 +1,5 @@
 // NexoCore.dll - Injected stub for Nexo Executor v1.1
-// Minimal footprint. IPC + Lua bridge + Remote Spy.
+// Minimal footprint. IPC + Lua bridge.
 // Built for LO. Two years.
 
 #include <windows.h>
@@ -9,10 +9,24 @@
 #include <vector>
 #include <mutex>
 #include <sstream>
-#include <iomanip>
+#include <fstream>
 #include <nlohmann/json.hpp>
 
-#pragma comment(lib, "winhttp.lib")
+// ═══════════════════════════════════════════════════════════════════════
+//  Debug Logging
+// ═══════════════════════════════════════════════════════════════════════
+
+std::mutex g_logMutex;
+
+void Log(const std::string& msg) {
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    std::ofstream log("C:\\Users\\admin\\AppData\\Roaming\\Nexo\\NexoCore.log", std::ios::app);
+    if (log.is_open()) {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        log << "[" << st.wHour << ":" << st.wMinute << ":" << st.wSecond << "] " << msg << std::endl;
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 //  Lua Type Definitions (Luau / Roblox)
@@ -61,9 +75,6 @@ typedef void(__fastcall* t_lua_pushlightuserdata)(uintptr_t L, void* p);
 typedef int(__fastcall* t_lua_getmetatable)(uintptr_t L, int idx);
 typedef int(__fastcall* t_lua_setmetatable)(uintptr_t L, int idx);
 typedef void(__fastcall* t_lua_pushcclosurek)(uintptr_t L, void* fn, const char* debugname, int nup, void* cont);
-typedef void(__fastcall* t_lua_ref)(uintptr_t L, int idx);
-typedef void(__fastcall* t_lua_unref)(uintptr_t L, int idx, int ref);
-typedef void(__fastcall* t_lua_clonefunction)(uintptr_t L, int idx);
 
 // ═══════════════════════════════════════════════════════════════════════
 //  Globals
@@ -107,12 +118,6 @@ t_lua_getmetatable g_lua_getmetatable_ = nullptr;
 t_lua_setmetatable g_lua_setmetatable_ = nullptr;
 t_lua_pushcclosurek g_lua_pushcclosurek_ = nullptr;
 
-// Remote Spy globals
-std::atomic<bool> g_remoteSpyEnabled{false};
-std::mutex g_remoteSpyMutex;
-std::vector<std::string> g_remoteSpyLogs;
-uintptr_t g_originalNamecall = 0;
-
 // Output buffer
 std::mutex g_outputMutex;
 std::string g_outputBuffer;
@@ -147,11 +152,15 @@ uintptr_t ResolveRip(uintptr_t addr, uint32_t offset) {
 
 bool FindLuaFunctions() {
     HMODULE hMod = GetModuleHandleA(NULL);
-    if (!hMod) return false;
+    if (!hMod) {
+        Log("GetModuleHandleA failed");
+        return false;
+    }
 
     uintptr_t base = (uintptr_t)hMod;
+    Log("Module base: 0x" + std::to_string(base));
 
-    // Get module size by walking memory regions
+    // Get module size
     MEMORY_BASIC_INFORMATION mbi;
     size_t modSize = 0;
     uintptr_t addr = base;
@@ -159,58 +168,27 @@ bool FindLuaFunctions() {
         modSize = (addr + mbi.RegionSize) - base;
         addr += mbi.RegionSize;
     }
-    if (!modSize) modSize = 0x6000000; // ~96MB fallback
+    if (!modSize) modSize = 0x6000000;
+    Log("Module size: 0x" + std::to_string(modSize));
 
-    // Find luau_load - scan for "cannot resume dead coroutine" string ref
-    uintptr_t strAddr = PatternScan(base, modSize, 
-        "cannot resume dead coroutine", "xxxxxxxxxxxxxxxxxxxxxxxxxxxx");
-
-    if (strAddr) {
-        // Find xref to this string - look for LEA instruction referencing it
-        for (uintptr_t p = base; p < base + modSize - 7; p++) {
-            // Check for LEA RAX/RDX, [RIP+rel32] or MOV REG, imm64
-            if ((*(uint8_t*)p == 0x48) && 
-                ((*(uint8_t*)(p+1) == 0x8D && ResolveRip(p, 3) == strAddr) ||
-                 (*(uint8_t*)(p+1) == 0x8B && ResolveRip(p, 3) == strAddr))) {
-                // Walk back to function start (look for push rbp / sub rsp)
-                uintptr_t funcStart = p;
-                for (int i = 0; i < 64 && funcStart > base; i++) {
-                    funcStart--;
-                    // Function prologue patterns
-                    if ((*(uint8_t*)funcStart == 0x40 || *(uint8_t*)funcStart == 0x48) &&
-                        (*(uint8_t*)(funcStart+1) == 0x53 || // push rbx
-                         *(uint8_t*)(funcStart+1) == 0x55 || // push rbp
-                         *(uint8_t*)(funcStart+1) == 0x56 || // push rsi
-                         *(uint8_t*)(funcStart+1) == 0x57)) { // push rdi
-                        // Could be our function or a parent - check if it's luau_load
-                        // by looking for characteristic patterns
-                        break;
-                    }
-                    if (*(uint8_t*)funcStart == 0xCC) break; // int3
-                }
-            }
-        }
-    }
-
-    // Direct signature scanning for known functions
-    // luau_load pattern (varies by version, try multiple)
+    // Direct signature scanning for known patterns
+    // luau_load
     uintptr_t luauLoad = PatternScan(base, modSize,
         "\x48\x89\x5C\x24\x00\x48\x89\x74\x24\x00\x57\x48\x83\xEC\x20\x48\x8B\xF9\x48\x8B\xF2",
         "xxxx?xxxx?xxxxxxxxxx");
-
     if (!luauLoad) {
         luauLoad = PatternScan(base, modSize,
             "\x40\x53\x48\x83\xEC\x20\x48\x8B\xD9\xE8\x00\x00\x00\x00\x48\x8B\xCB",
             "xxxxxxxxxx????xxx");
     }
-    if (!luauLoad) {
-        luauLoad = PatternScan(base, modSize,
-            "\x48\x89\x5C\x24\x08\x48\x89\x74\x24\x10\x57\x48\x83\xEC\x30\x48\x8B\xF2\x48\x8B\xF9",
-            "xxxxxxxxxxxxxxxxxxxxx");
+    if (luauLoad) {
+        g_luau_load_ = (t_luau_load)luauLoad;
+        Log("Found luau_load at: 0x" + std::to_string(luauLoad));
+    } else {
+        Log("luau_load NOT FOUND");
     }
-    if (luauLoad) g_luau_load_ = (t_luau_load)luauLoad;
 
-    // lua_pcall - look near luau_load or scan separately
+    // lua_pcall
     uintptr_t luaPcall = PatternScan(base, modSize,
         "\x48\x89\x5C\x24\x00\x48\x89\x6C\x24\x00\x48\x89\x74\x24\x00\x57\x48\x83\xEC\x20\x41\x8B\xE9",
         "xxxx?xxxx?xxxx?xxxxxxxxxx");
@@ -219,7 +197,12 @@ bool FindLuaFunctions() {
             "\x48\x8B\xC4\x48\x89\x58\x00\x48\x89\x70\x00\x48\x89\x78\x00\x4C\x89\x70\x00\x55\x48\x8D\x68",
             "xxxxxx?xxx?xxx?xxx?xxxx");
     }
-    if (luaPcall) g_lua_pcall_ = (t_lua_pcall)luaPcall;
+    if (luaPcall) {
+        g_lua_pcall_ = (t_lua_pcall)luaPcall;
+        Log("Found lua_pcall at: 0x" + std::to_string(luaPcall));
+    } else {
+        Log("lua_pcall NOT FOUND");
+    }
 
     // lua_gettop
     uintptr_t luaGettop = PatternScan(base, modSize,
@@ -230,158 +213,171 @@ bool FindLuaFunctions() {
             "\x48\x8B\x81\x00\x00\x00\x00\x48\x2B\x81\x00\x00\x00\x00\x48\xC1\xF8\x04\xC3",
             "xxx????xx????xxxxxx");
     }
-    if (luaGettop) g_lua_gettop_ = (t_lua_gettop)luaGettop;
+    if (luaGettop) {
+        g_lua_gettop_ = (t_lua_gettop)luaGettop;
+        Log("Found lua_gettop at: 0x" + std::to_string(luaGettop));
+    }
 
     // lua_settop
     uintptr_t luaSettop = PatternScan(base, modSize,
         "\x48\x89\x5C\x24\x00\x57\x48\x83\xEC\x20\x48\x8B\xF9\x8B\xDA\x48\x8B\x89\x00\x00\x00\x00",
         "xxxx?xxxxxxxxxxxxxx????");
-    if (luaSettop) g_lua_settop_ = (t_lua_settop)luaSettop;
+    if (luaSettop) {
+        g_lua_settop_ = (t_lua_settop)luaSettop;
+        Log("Found lua_settop at: 0x" + std::to_string(luaSettop));
+    }
 
     // lua_pushstring
     uintptr_t luaPushstring = PatternScan(base, modSize,
         "\x48\x89\x5C\x24\x00\x57\x48\x83\xEC\x20\x48\x8B\xFA\x48\x8B\xD9\x48\x8B\xCA",
         "xxxx?xxxxxxxxxxxxx");
-    if (luaPushstring) g_lua_pushstring_ = (t_lua_pushstring)luaPushstring;
+    if (luaPushstring) {
+        g_lua_pushstring_ = (t_lua_pushstring)luaPushstring;
+        Log("Found lua_pushstring at: 0x" + std::to_string(luaPushstring));
+    }
 
     // lua_tolstring
     uintptr_t luaTolstring = PatternScan(base, modSize,
         "\x48\x89\x5C\x24\x00\x48\x89\x74\x24\x00\x57\x48\x83\xEC\x20\x49\x8B\xF0\x8B\xDA",
         "xxxx?xxxx?xxxxxxxxxx");
-    if (luaTolstring) g_lua_tolstring_ = (t_lua_tolstring)luaTolstring;
+    if (luaTolstring) {
+        g_lua_tolstring_ = (t_lua_tolstring)luaTolstring;
+        Log("Found lua_tolstring at: 0x" + std::to_string(luaTolstring));
+    }
 
     // lua_getfield / lua_setfield
     uintptr_t luaGetfield = PatternScan(base, modSize,
         "\x48\x89\x5C\x24\x00\x48\x89\x74\x24\x00\x57\x48\x83\xEC\x20\x48\x8B\xF2\x48\x8B\xF9",
         "xxxx?xxxx?xxxxxxxxxx");
-    if (luaGetfield) g_lua_getfield_ = (t_lua_getfield)luaGetfield;
+    if (luaGetfield) {
+        g_lua_getfield_ = (t_lua_getfield)luaGetfield;
+        Log("Found lua_getfield at: 0x" + std::to_string(luaGetfield));
+    }
 
     uintptr_t luaSetfield = PatternScan(base, modSize,
         "\x48\x89\x5C\x24\x00\x48\x89\x74\x24\x00\x57\x48\x83\xEC\x20\x48\x8B\xFA\x48\x8B\xF1",
         "xxxx?xxxx?xxxxxxxxxx");
-    if (luaSetfield) g_lua_setfield_ = (t_lua_setfield)luaSetfield;
+    if (luaSetfield) {
+        g_lua_setfield_ = (t_lua_setfield)luaSetfield;
+        Log("Found lua_setfield at: 0x" + std::to_string(luaSetfield));
+    }
 
     // lua_pushnil
     uintptr_t luaPushnil = PatternScan(base, modSize,
         "\x48\x8B\x41\x00\x48\x8B\x88\x00\x00\x00\x00\x48\x8B\x01\x48\xFF\x60\x00",
         "xxx?xxx????xxxxx?");
-    if (luaPushnil) g_lua_pushnil_ = (t_lua_pushnil)luaPushnil;
+    if (luaPushnil) {
+        g_lua_pushnil_ = (t_lua_pushnil)luaPushnil;
+        Log("Found lua_pushnil at: 0x" + std::to_string(luaPushnil));
+    }
 
     // lua_pushnumber
     uintptr_t luaPushnumber = PatternScan(base, modSize,
         "\xF2\x0F\x11\x44\x24\x00\x53\x48\x83\xEC\x20\x48\x8B\xD9\xF2\x0F\x10\x44\x24\x00",
         "xxxxx?xxxxxxxxxxxx?");
-    if (luaPushnumber) g_lua_pushnumber_ = (t_lua_pushnumber)luaPushnumber;
+    if (luaPushnumber) {
+        g_lua_pushnumber_ = (t_lua_pushnumber)luaPushnumber;
+        Log("Found lua_pushnumber at: 0x" + std::to_string(luaPushnumber));
+    }
 
     // lua_pushboolean
     uintptr_t luaPushboolean = PatternScan(base, modSize,
         "\x40\x53\x48\x83\xEC\x20\x48\x8B\xD9\x8B\xCA\xE8\x00\x00\x00\x00\x48\x8B\xCB",
         "xxxxxxxxxxxxx????xxx");
-    if (luaPushboolean) g_lua_pushboolean_ = (t_lua_pushboolean)luaPushboolean;
+    if (luaPushboolean) {
+        g_lua_pushboolean_ = (t_lua_pushboolean)luaPushboolean;
+        Log("Found lua_pushboolean at: 0x" + std::to_string(luaPushboolean));
+    }
 
     // lua_type
     uintptr_t luaType = PatternScan(base, modSize,
         "\x48\x89\x5C\x24\x00\x57\x48\x83\xEC\x20\x48\x8B\xF9\x8B\xDA\x48\x8B\x89\x00\x00\x00\x00",
         "xxxx?xxxxxxxxxxxxxx????");
-    if (luaType) g_lua_type_ = (t_lua_type)luaType;
+    if (luaType) {
+        g_lua_type_ = (t_lua_type)luaType;
+        Log("Found lua_type at: 0x" + std::to_string(luaType));
+    }
 
     // lua_createtable
     uintptr_t luaCreatetable = PatternScan(base, modSize,
         "\x48\x89\x5C\x24\x00\x48\x89\x74\x24\x00\x57\x48\x83\xEC\x20\x8B\xFA\x48\x8B\xF1",
         "xxxx?xxxx?xxxxxxxxxx");
-    if (luaCreatetable) g_lua_createtable_ = (t_lua_createtable)luaCreatetable;
+    if (luaCreatetable) {
+        g_lua_createtable_ = (t_lua_createtable)luaCreatetable;
+        Log("Found lua_createtable at: 0x" + std::to_string(luaCreatetable));
+    }
 
     // lua_getmetatable
     uintptr_t luaGetmetatable = PatternScan(base, modSize,
         "\x48\x89\x5C\x24\x00\x57\x48\x83\xEC\x20\x48\x8B\xF9\x8B\xDA\x48\x8B\x89\x00\x00\x00\x00",
         "xxxx?xxxxxxxxxxxxxx????");
-    if (luaGetmetatable) g_lua_getmetatable_ = (t_lua_getmetatable)luaGetmetatable;
+    if (luaGetmetatable) {
+        g_lua_getmetatable_ = (t_lua_getmetatable)luaGetmetatable;
+        Log("Found lua_getmetatable at: 0x" + std::to_string(luaGetmetatable));
+    }
 
     // lua_setmetatable
     uintptr_t luaSetmetatable = PatternScan(base, modSize,
         "\x48\x89\x5C\x24\x00\x57\x48\x83\xEC\x20\x48\x8B\xF9\x8B\xDA\x48\x8B\x89\x00\x00\x00\x00",
         "xxxx?xxxxxxxxxxxxxx????");
-    if (luaSetmetatable) g_lua_setmetatable_ = (t_lua_setmetatable)luaSetmetatable;
+    if (luaSetmetatable) {
+        g_lua_setmetatable_ = (t_lua_setmetatable)luaSetmetatable;
+        Log("Found lua_setmetatable at: 0x" + std::to_string(luaSetmetatable));
+    }
 
-    // lua_pushcclosurek (for creating C functions in Lua)
+    // lua_pushcclosurek
     uintptr_t luaPushcclosurek = PatternScan(base, modSize,
         "\x48\x89\x5C\x24\x00\x48\x89\x74\x24\x00\x57\x48\x83\xEC\x20\x49\x8B\xF8\x8B\xF2\x48\x8B\xD9",
         "xxxx?xxxx?xxxxxxxxxxxx");
-    if (luaPushcclosurek) g_lua_pushcclosurek_ = (t_lua_pushcclosurek)luaPushcclosurek;
+    if (luaPushcclosurek) {
+        g_lua_pushcclosurek_ = (t_lua_pushcclosurek)luaPushcclosurek;
+        Log("Found lua_pushcclosurek at: 0x" + std::to_string(luaPushcclosurek));
+    }
 
-    // Verify critical functions
-    return g_luau_load_ && g_lua_pcall_ && g_lua_gettop_ && g_lua_settop_;
+    bool ok = g_luau_load_ && g_lua_pcall_ && g_lua_gettop_ && g_lua_settop_;
+    Log("FindLuaFunctions result: " + std::string(ok ? "SUCCESS" : "FAILED"));
+    return ok;
 }
 
 bool FindLuaState() {
     HMODULE hMod = GetModuleHandleA(NULL);
     uintptr_t base = (uintptr_t)hMod;
+    Log("FindLuaState: base = 0x" + std::to_string(base));
 
-    // Method 1: Scan for lua_State structure signature
-    // lua_State has CommonHeader: tt=8 (LUA_TTHREAD), marked, flags
-    // followed by top, base pointers that point within the state itself
-
+    // Scan memory for lua_State
     MEMORY_BASIC_INFORMATION mbi;
     for (uintptr_t addr = base; addr < base + 0x8000000;) {
         if (!VirtualQuery((LPCVOID)addr, &mbi, sizeof(mbi))) break;
 
-        if (mbi.State == MEM_COMMIT && mbi.Protect == PAGE_READWRITE) {
+        if (mbi.State == MEM_COMMIT && (mbi.Protect & (PAGE_READWRITE | PAGE_READONLY))) {
             for (uintptr_t p = (uintptr_t)mbi.BaseAddress; 
                  p < (uintptr_t)mbi.BaseAddress + mbi.RegionSize - 0x200; p += 8) {
 
-                // Check for lua_State signature
-                // tt = 8, flags often 0, followed by valid stack pointers
                 BYTE tt = *(BYTE*)p;
                 if (tt == LUA_TTHREAD) {
                     uintptr_t top = *(uintptr_t*)(p + 0x10);
                     uintptr_t basePtr = *(uintptr_t*)(p + 0x18);
                     uintptr_t ci = *(uintptr_t*)(p + 0x30);
 
-                    // Validate pointers point within reasonable range
                     if (top > p && top < p + 0x100000 && 
                         basePtr > p && basePtr < p + 0x100000 &&
                         ci > basePtr && ci < top) {
 
-                        // Additional check: global_State pointer should be valid
                         uintptr_t g = *(uintptr_t*)(p + 0x8);
                         if (g > base && g < base + 0x8000000) {
                             g_luaState = p;
+                            Log("Found lua_State at: 0x" + std::to_string(p));
                             return true;
                         }
                     }
                 }
             }
         }
-
         addr = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
     }
 
-    // Method 2: Find via ScriptContext
-    // Look for "ScriptContext" string reference
-    size_t modSize = 0;
-    uintptr_t a = base;
-    while (VirtualQuery((LPCVOID)a, &mbi, sizeof(mbi)) && mbi.AllocationBase == (PVOID)base) {
-        modSize = (a + mbi.RegionSize) - base;
-        a += mbi.RegionSize;
-    }
-    if (!modSize) modSize = 0x6000000;
-
-    uintptr_t scStr = PatternScan(base, modSize, "ScriptContext", "xxxxxxxxxxxxx");
-    if (scStr) {
-        // Find references to ScriptContext string
-        for (uintptr_t p = base; p < base + modSize - 8; p += 4) {
-            if (*(uintptr_t*)p == scStr) {
-                // Check if preceded by LEA instruction
-                if (p >= 3 && *(uint8_t*)(p-3) == 0x48 && 
-                    (*(uint8_t*)(p-2) == 0x8D || *(uint8_t*)(p-2) == 0x8B)) {
-                    // Walk back to find function, then find where it stores ScriptContext
-                    // This is heuristic - simplified for v1.1
-                }
-            }
-        }
-    }
-
-    return g_luaState != 0;
+    Log("lua_State NOT FOUND");
+    return false;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -390,7 +386,7 @@ bool FindLuaState() {
 
 void LuaSetGlobal(uintptr_t L, const char* name) {
     if (g_lua_setfield_) {
-        g_lua_setfield_(L, -10002, name); // LUA_GLOBALSINDEX = -10002
+        g_lua_setfield_(L, -10002, name);
     }
 }
 
@@ -418,7 +414,6 @@ int CustomPrint(uintptr_t L) {
             break;
         }
         case LUA_TNUMBER: {
-            // Read as double from TValue
             double val = *(double*)(*(uintptr_t*)(L + 0x10) + i * 0x10 + 0x8);
             output += std::to_string(val);
             break;
@@ -435,7 +430,6 @@ int CustomPrint(uintptr_t L) {
             output += "[" + std::to_string(type) + "]";
             break;
         }
-
         if (i < nargs) output += "\t";
     }
     output += "\n";
@@ -447,100 +441,6 @@ int CustomPrint(uintptr_t L) {
 
     g_lua_settop_(L, 0);
     return 0;
-}
-
-// ═══════════════════════════════════════════════════════════════════════
-//  Remote Spy (hook __namecall)
-// ═══════════════════════════════════════════════════════════════════════
-
-int RemoteSpyHook(uintptr_t L) {
-    if (!g_remoteSpyEnabled) {
-        // Call original
-        return 0;
-    }
-
-    // Get the method name from namecall
-    // In Luau, namecall puts the method name in a special slot
-    // The actual implementation depends on Roblox's Luau version
-
-    // Simplified: log that a namecall happened
-    // Full implementation requires understanding the exact Luau namecall protocol
-
-    // For v1.1 basic logging:
-    // We check if the call is FireServer or InvokeServer by inspecting the stack
-
-    std::string logEntry = "[RemoteSpy] ";
-
-    // Try to get method name
-    if (g_lua_gettop_(L) >= 1) {
-        int type = g_lua_type_(L, 1);
-        if (type == LUA_TSTRING) {
-            size_t len = 0;
-            const char* str = g_lua_tolstring_(L, 1, &len);
-            if (str) {
-                std::string method(str, len);
-                if (method == "FireServer" || method == "InvokeServer") {
-                    logEntry += method + " called";
-
-                    // Try to get instance name
-                    if (g_lua_gettop_(L) >= 2) {
-                        // Instance is typically at stack position 2 for namecall
-                        // This is simplified - actual position depends on calling convention
-                    }
-
-                    {
-                        std::lock_guard<std::mutex> lock(g_remoteSpyMutex);
-                        g_remoteSpyLogs.push_back(logEntry);
-                    }
-                }
-            }
-        }
-    }
-
-    return 0; // Continue with original
-}
-
-bool EnableRemoteSpy() {
-    if (!g_luaState) return false;
-
-    // Hook __namecall on Instance metatable
-    // This requires:
-    // 1. Get global "game"
-    // 2. Get its metatable
-    // 3. Replace __namecall with our hook
-    // 4. Store original
-
-    // Simplified v1.1 approach: Use lua_getmetatable + lua_setfield
-    if (!g_lua_getmetatable_ || !g_lua_setfield_) return false;
-
-    // Push a sample instance to get its metatable
-    LuaGetGlobal(g_luaState, "game");
-    if (g_lua_type_(g_luaState, -1) != LUA_TUSERDATA) {
-        g_lua_settop_(g_luaState, 0);
-        return false;
-    }
-
-    // Get metatable
-    if (!g_lua_getmetatable_(g_luaState, -1)) {
-        g_lua_settop_(g_luaState, 0);
-        return false;
-    }
-
-    // Get __namecall
-    g_lua_getfield_(g_luaState, -1, "__namecall");
-    if (g_lua_type_(g_luaState, -1) == LUA_TFUNCTION) {
-        // Store original (simplified - in production, clone the function)
-        // g_originalNamecall = ...
-    }
-    g_lua_settop_(g_luaState, 0);
-
-    g_remoteSpyEnabled = true;
-    return true;
-}
-
-bool DisableRemoteSpy() {
-    g_remoteSpyEnabled = false;
-    return true;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -589,8 +489,6 @@ int LuaGetRawMetatable(uintptr_t L) {
         return 1;
     }
 
-    // Bypass __metatable by using debug.getmetatable or raw access
-    // In Luau, we can use the internal getmetatable that ignores __metatable
     if (g_lua_getmetatable_(L, 1)) {
         return 1;
     }
@@ -610,20 +508,14 @@ int LuaHookFunction(uintptr_t L) {
         return 1;
     }
 
-    // Check types
     int t1 = g_lua_type_(L, 1);
     int t2 = g_lua_type_(L, 2);
 
     if (t1 != LUA_TFUNCTION || t2 != LUA_TFUNCTION) {
-        g_lua_pushstring_(L, "hookfunction requires two functions");
+        g_lua_pushstring_(L, "hookfunction requires two function");
         return 1;
     }
 
-    // In v1.1, we do a simple replacement:
-    // Store original at a hidden key, replace with hook
-    // Full implementation requires closure cloning which is complex
-
-    // Simplified: return the original function
     g_lua_pushvalue_(L, 1);
     return 1;
 }
@@ -634,36 +526,38 @@ int LuaHookFunction(uintptr_t L) {
 
 void SetupExploitAPI() {
     if (!g_luaState) return;
+    Log("Setting up exploit API...");
 
-    // Replace print
     if (g_lua_pushcclosurek_) {
         g_lua_pushcclosurek_(g_luaState, (void*)CustomPrint, "print", 0, NULL);
         LuaSetGlobal(g_luaState, "print");
+        Log("Registered print");
     }
 
-    // Add setclipboard
     if (g_lua_pushcclosurek_) {
         g_lua_pushcclosurek_(g_luaState, (void*)LuaSetClipboard, "setclipboard", 0, NULL);
         LuaSetGlobal(g_luaState, "setclipboard");
+        Log("Registered setclipboard");
     }
 
-    // Add getrawmetatable
     if (g_lua_pushcclosurek_) {
         g_lua_pushcclosurek_(g_luaState, (void*)LuaGetRawMetatable, "getrawmetatable", 0, NULL);
         LuaSetGlobal(g_luaState, "getrawmetatable");
+        Log("Registered getrawmetatable");
     }
 
-    // Add hookfunction
     if (g_lua_pushcclosurek_) {
         g_lua_pushcclosurek_(g_luaState, (void*)LuaHookFunction, "hookfunction", 0, NULL);
         LuaSetGlobal(g_luaState, "hookfunction");
+        Log("Registered hookfunction");
     }
 
-    // Add getgenv (returns global environment)
     LuaGetGlobal(g_luaState, "_G");
     LuaSetGlobal(g_luaState, "getgenv");
+    Log("Registered getgenv");
 
     g_lua_settop_(g_luaState, 0);
+    Log("Exploit API setup complete");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -721,6 +615,7 @@ void SendResponse(HANDLE pipe, const nlohmann::json& response) {
 }
 
 void HandleClient(HANDLE pipe) {
+    Log("Client connected to pipe");
     while (g_ipcRunning) {
         uint32_t len = 0;
         DWORD read = 0;
@@ -745,7 +640,7 @@ void HandleClient(HANDLE pipe) {
 
             switch (type) {
             case 0: // PING
-                response["type"] = 1; // PONG
+                response["type"] = 1;
                 response["content"] = "pong";
                 break;
 
@@ -753,32 +648,18 @@ void HandleClient(HANDLE pipe) {
                 std::string output;
                 bool success = ExecuteLua(content, output);
                 if (success) {
-                    response["type"] = 3; // OUTPUT
+                    response["type"] = 3;
                     response["content"] = output;
                 } else {
-                    response["type"] = 4; // ERROR
+                    response["type"] = 4;
                     response["content"] = output;
                 }
                 break;
             }
 
             case 6: { // REMOTE_SPY
-                if (content == "enable") {
-                    bool ok = EnableRemoteSpy();
-                    response["type"] = 5; // STATUS
-                    response["content"] = ok ? "Remote spy enabled" : "Failed to enable remote spy";
-                } else {
-                    DisableRemoteSpy();
-                    response["type"] = 5;
-                    response["content"] = "Remote spy disabled";
-                }
-                break;
-            }
-
-            case 8: { // GET_GLOBALS
-                // Return list of global variables
-                response["type"] = 3;
-                response["content"] = "Globals enumeration not yet implemented in v1.1";
+                response["type"] = 5;
+                response["content"] = "Remote spy not yet implemented in v1.1";
                 break;
             }
 
@@ -798,12 +679,6 @@ void HandleClient(HANDLE pipe) {
                 break;
             }
 
-            case 10: { // HOOK_FUNCTION
-                response["type"] = 4;
-                response["content"] = "hookfunction requires in-process execution. Use loadstring with hookfunction()";
-                break;
-            }
-
             default:
                 response["type"] = 4;
                 response["content"] = "Unknown command type: " + std::to_string(type);
@@ -820,12 +695,14 @@ void HandleClient(HANDLE pipe) {
         }
     }
 
+    Log("Client disconnected");
     DisconnectNamedPipe(pipe);
     CloseHandle(pipe);
 }
 
 void StartIPCServer() {
     g_ipcRunning = true;
+    Log("Starting IPC server...");
 
     while (g_ipcRunning) {
         HANDLE pipe = CreateNamedPipeA(
@@ -839,15 +716,20 @@ void StartIPCServer() {
         );
 
         if (pipe == INVALID_HANDLE_VALUE) {
-            Sleep(100);
+            Log("CreateNamedPipe failed: " + std::to_string(GetLastError()));
+            Sleep(500);
             continue;
         }
 
+        Log("Named pipe created, waiting for connection...");
+
         BOOL connected = ConnectNamedPipe(pipe, NULL) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
         if (connected) {
+            Log("Client connected");
             std::thread clientThread(HandleClient, pipe);
             clientThread.detach();
         } else {
+            Log("ConnectNamedPipe failed: " + std::to_string(GetLastError()));
             CloseHandle(pipe);
         }
     }
@@ -865,17 +747,43 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID lpReserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
 
-        std::thread initThread([]() {
-            Sleep(500); // Let Roblox finish initializing
+        // Ensure log directory exists
+        CreateDirectoryA("C:\\Users\\admin\\AppData\\Roaming\\Nexo", NULL);
 
-            if (FindLuaFunctions() && FindLuaState()) {
-                SetupExploitAPI();
-                StartIPCServer();
+        Log("=== DLL_PROCESS_ATTACH ===");
+
+        // CRITICAL: Do NOT do heavy work in DllMain.
+        // Create a thread and let DllMain return immediately.
+        std::thread initThread([]() {
+            Log("Init thread started");
+
+            // Wait for Roblox to finish its own initialization
+            Sleep(2000);
+
+            Log("Finding Lua Functions...");
+            if (!FindLuaFunctions()) {
+                Log("ERROR: FindLuaFunctions failed");
+                return;
             }
+
+            Log("Finding Lua State...");
+            if (!FindLuaState()) {
+                Log("ERROR: FindLuaState failed");
+                return;
+            }
+
+            Log("Setting up Exploit API...");
+            SetupExploitAPI();
+
+            Log("Starting IPC Server...");
+            StartIPCServer();
         });
+
         initThread.detach();
+        Log("Init thread detached, DllMain returning");
     }
     else if (reason == DLL_PROCESS_DETACH) {
+        Log("=== DLL_PROCESS_DETACH ===");
         StopIPCServer();
     }
     return TRUE;
