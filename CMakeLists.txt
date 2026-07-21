@@ -22,7 +22,7 @@ set(IMGUI_SOURCES
     ${IMGUI_DIR}/backends/imgui_impl_dx11.cpp
 )
 
-set(JSON_DIR ${CMAKE_SOURCE_DIR}/third_party/nlohmann)
+set(JSON_DIR ${CMAKE_SOURCE_DIR}/third_party)
 
 add_executable(Nexo WIN32
     Nexo/main.cpp
