@@ -17,8 +17,13 @@ jobs:
     
     - name: Download nlohmann/json
       run: |
-        if (-Not (Test-Path "third_party/nlohmann")) { New-Item -ItemType Directory -Path "third_party/nlohmann" -Force }
-        Invoke-WebRequest -Uri "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp" -OutFile "third_party/nlohmann/json.hpp"
+        New-Item -ItemType Directory -Path "third_party/nlohmann" -Force
+        $url = "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp"
+        $output = "third_party/nlohmann/json.hpp"
+        Invoke-WebRequest -Uri $url -OutFile $output -MaximumRedirection 5
+        if (-Not (Test-Path $output)) { throw "Failed to download json.hpp" }
+        Write-Host "json.hpp downloaded successfully"
+        Get-Item $output
     
     - name: Configure CMake
       run: cmake -B build -A x64
