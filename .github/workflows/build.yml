@@ -15,15 +15,12 @@ jobs:
     - name: Clone ImGui
       run: git clone --branch docking --depth 1 https://github.com/ocornut/imgui.git third_party/imgui
     
-    - name: Download nlohmann/json
+    - name: Setup nlohmann/json
       run: |
-        New-Item -ItemType Directory -Path "third_party/nlohmann" -Force
-        $url = "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp"
-        $output = "third_party/nlohmann/json.hpp"
-        Invoke-WebRequest -Uri $url -OutFile $output -MaximumRedirection 5
-        if (-Not (Test-Path $output)) { throw "Failed to download json.hpp" }
-        Write-Host "json.hpp downloaded successfully"
-        Get-Item $output
+        mkdir third_party\nlohmann
+        curl -L -o third_party\nlohmann\json.hpp https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp
+        if not exist third_party\nlohmann\json.hpp exit 1
+        dir third_party\nlohmann\json.hpp
     
     - name: Configure CMake
       run: cmake -B build -A x64
@@ -38,4 +35,4 @@ jobs:
         path: |
           build/bin/Release/Nexo.exe
           build/bin/Release/NexoCore.dll
-        if-no-files-found: warn
+        if-no-files-found: error
