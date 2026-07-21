@@ -15,19 +15,7 @@ jobs:
     - name: Clone ImGui
       run: git clone --branch docking --depth 1 https://github.com/ocornut/imgui.git third_party/imgui
     
-    - name: Setup nlohmann/json
-      shell: cmd
-      run: |
-        if not exist third_party\nlohmann mkdir third_party\nlohmann
-        curl.exe -L -o third_party\nlohmann\json.hpp https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp
-        if not exist third_party\nlohmann\json.hpp (
-          echo Fallback download...
-          curl.exe -L -o third_party\nlohmann\json.hpp https://raw.githubusercontent.com/nlohmann/json/v3.11.3/single_include/nlohmann/json.hpp
-        )
-        if not exist third_party\nlohmann\json.hpp exit 1
-        dir third_party\nlohmann\json.hpp
-    
-    - name: Verify files exist
+    - name: Verify dependencies
       shell: cmd
       run: |
         if not exist third_party\imgui\imgui.cpp exit 1
