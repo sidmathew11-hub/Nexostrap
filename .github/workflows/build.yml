@@ -16,28 +16,23 @@ jobs:
       run: git clone --branch docking --depth 1 https://github.com/ocornut/imgui.git third_party/imgui
     
     - name: Setup nlohmann/json
-      shell: pwsh
+      shell: cmd
       run: |
-        $jsonDir = "third_party/nlohmann"
-        New-Item -ItemType Directory -Path $jsonDir -Force | Out-Null
-        $url = "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp"
-        $output = "$jsonDir/json.hpp"
-        try {
-          Invoke-WebRequest -Uri $url -OutFile $output -MaximumRedirection 5 -TimeoutSec 30
-        } catch {
-          Write-Host "Primary download failed, trying fallback..."
-          Invoke-WebRequest -Uri "https://raw.githubusercontent.com/nlohmann/json/v3.11.3/single_include/nlohmann/json.hpp" -OutFile $output -TimeoutSec 30
-        }
-        if (-Not (Test-Path $output)) { throw "Failed to download json.hpp" }
-        Write-Host "json.hpp downloaded successfully"
-        Get-Item $output
+        if not exist third_party\nlohmann mkdir third_party\nlohmann
+        curl.exe -L -o third_party\nlohmann\json.hpp https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp
+        if not exist third_party\nlohmann\json.hpp (
+          echo Fallback download...
+          curl.exe -L -o third_party\nlohmann\json.hpp https://raw.githubusercontent.com/nlohmann/json/v3.11.3/single_include/nlohmann/json.hpp
+        )
+        if not exist third_party\nlohmann\json.hpp exit 1
+        dir third_party\nlohmann\json.hpp
     
     - name: Verify files exist
-      shell: pwsh
+      shell: cmd
       run: |
-        if (-Not (Test-Path "third_party/imgui/imgui.cpp")) { throw "ImGui not found" }
-        if (-Not (Test-Path "third_party/nlohmann/json.hpp")) { throw "json.hpp not found" }
-        Write-Host "All dependencies present"
+        if not exist third_party\imgui\imgui.cpp exit 1
+        if not exist third_party\nlohmann\json.hpp exit 1
+        echo All dependencies present
     
     - name: Configure CMake
       run: cmake -B build -A x64
