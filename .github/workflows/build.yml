@@ -18,7 +18,7 @@ jobs:
     - name: Setup nlohmann/json
       shell: cmd
       run: |
-        mkdir third_party\nlohmann 2>nul
+        if not exist third_party\nlohmann mkdir third_party\nlohmann
         curl -L -o third_party\nlohmann\json.hpp https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp
         if not exist third_party\nlohmann\json.hpp exit 1
         dir third_party\nlohmann\json.hpp
