@@ -102,11 +102,11 @@ int MainLoop() {
     // Initialize UI
     g_ui = std::make_unique<UI>();
 
-    // Set callbacks
+    // Set callbacks - capture hwnd by reference
     g_ui->onInject = []() { Inject(); };
     g_ui->onExecute = []() { ExecuteScript(); };
     g_ui->onClear = []() { g_ui->ClearOutput(); };
-    g_ui->onOpen = []() {
+    g_ui->onOpen = [&hwnd]() {
         char filename[MAX_PATH] = {};
         OPENFILENAMEA ofn = {};
         ofn.lStructSize = sizeof(ofn);
@@ -126,7 +126,7 @@ int MainLoop() {
             }
         }
     };
-    g_ui->onSave = []() {
+    g_ui->onSave = [&hwnd]() {
         char filename[MAX_PATH] = {};
         OPENFILENAMEA ofn = {};
         ofn.lStructSize = sizeof(ofn);
@@ -193,16 +193,16 @@ int MainLoop() {
         if (g_ipc && g_ipc->HasMessage()) {
             auto response = g_ipc->PopMessage();
             switch (response.type) {
-            case IPCType::OUTPUT:
+            case NexoIPCType::IPC_OUTPUT:
                 g_ui->AddOutput(response.content, 0xFFFFFFFF);
                 break;
-            case IPCType::ERROR:
+            case NexoIPCType::IPC_ERROR:
                 g_ui->AddOutput("[Error] " + response.content, 0xFFFF5555);
                 break;
-            case IPCType::STATUS:
+            case NexoIPCType::IPC_STATUS_MSG:
                 g_ui->AddOutput("[Status] " + response.content, 0xFF55AAFF);
                 break;
-            case IPCType::REMOTE_SPY:
+            case NexoIPCType::IPC_REMOTE_SPY_LOG:
                 g_ui->AddOutput("[RemoteSpy] " + response.content, 0xFFFFAA00);
                 break;
             default:
