@@ -1,0 +1,35 @@
+name: Build Nexo Executor
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Clone ImGui
+      run: git clone --branch docking https://github.com/ocornut/imgui.git third_party/imgui
+    
+    - name: Download nlohmann/json
+      run: |
+        mkdir -p third_party/nlohmann
+        Invoke-WebRequest -Uri "https://github.com/nlohmann/json/releases/download/v3.11.3/json.hpp" -OutFile "third_party/nlohmann/json.hpp"
+    
+    - name: Configure CMake
+      run: cmake -B build -A x64
+    
+    - name: Build
+      run: cmake --build build --config Release
+    
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: NexoExecutor-Release
+        path: |
+          build/bin/Release/Nexo.exe
+          build/bin/Release/NexoCore.dll
