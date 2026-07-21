@@ -81,7 +81,3 @@ target_compile_definitions(NexoCore PRIVATE
 if(MSVC)
     target_compile_options(NexoCore PRIVATE /MP /W3 /EHsc)
 endif()
-
-add_custom_command(TARGET NexoCore POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    $<TARGET_FILE:N
