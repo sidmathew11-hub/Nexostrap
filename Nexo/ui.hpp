@@ -14,20 +14,6 @@ struct ScriptTab {
     bool open = true;
 };
 
-#include <string>
-#include <vector>
-#include <memory>
-#include <functional>
-
-namespace nexo {
-
-struct ScriptTab {
-    std::string name;
-    std::string content;
-    bool modified = false;
-    bool open = true;
-};
-
 struct OutputEntry {
     std::string text;
     uint32_t color; // RGBA
