@@ -11,8 +11,10 @@
 #include "injector.hpp"
 #include "ipc_client.hpp"
 
+#include <imgui.h>
+
 // ImGui Win32 message handler
-extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+extern "C" LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 namespace nexo {
 
